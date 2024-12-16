@@ -1,15 +1,15 @@
 import logging
 import json
-import os
 import telegram
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes, ConversationHandler, CallbackQueryHandler
 import sqlite3
 from datetime import datetime, timedelta, time
 from dotenv import load_dotenv
 import warnings
 from quickstart import update_sheet_row
 import pytz
+import os
+from telegram.ext import Application, CommandHandler, ConversationHandler, CallbackQueryHandler, PicklePersistence, PersistenceInput, ContextTypes
 
 warnings.filterwarnings("ignore", category=telegram.warnings.PTBUserWarning)
 
@@ -105,11 +105,11 @@ def init_tasks_for_specialist(specialist):
         for project in specialist['projects']:
             for task in tasks:
                 # Убедитесь, что вы используете правильный ключ для доступа к интервалу
-                next_reminder = now + timedelta(hours=task['interval_hours'])
+                next_reminder = now + timedelta(minutes=task['interval_minutes'])
                 next_reminder = get_next_workday(next_reminder)
                 c.execute(
                     "INSERT INTO tasks (project, task, interval, next_reminder) VALUES (?, ?, ?, ?)",
-                    (project, task['task'], task['interval_hours'], next_reminder.isoformat())
+                    (project, task['task'], task['interval_minutes'], next_reminder.isoformat())
                 )
 
     logger.info(f"Задачи загружены для специалиста {specialist['surname']}")
@@ -155,7 +155,7 @@ def is_workday(date):
 # ПОЛУЧЕНИЕ СЛЕДУЮЩЕГО РАБОЧЕГО ДНЯ
 def get_next_workday(date):
     while not is_workday(date):
-        date += timedelta(hours=1)
+        date += timedelta(minutes=1)
     return date
 
 
@@ -247,8 +247,11 @@ async def specialist_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         # Отправка списка напоминаний через 10 секунд
         context.job_queue.run_once(send_reminder_list, 10,
                                    data={'projects': specialist['projects'], 'chat_id': query.message.chat.id})
-        # Запуск регулярных проверок каждые 1800 секунд
-        context.job_queue.run_repeating(check_reminders, interval=1800, first=5,
+        # Отправка ближайшей задачи через 20 секунд
+        context.job_queue.run_once(send_nearest_task, 20,
+                                   data={'projects': specialist['projects'], 'chat_id': query.message.chat.id})
+        # Запуск регулярных проверок каждые 48 секунд
+        context.job_queue.run_repeating(check_reminders, interval=30, first=5,
                                         data={'projects': specialist['projects'], 'chat_id': query.message.chat.id},
                                         name=str(query.message.chat.id))
         update_user_status(query.from_user.id, specialist['surname'], "Подключен")
@@ -259,7 +262,7 @@ async def specialist_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 async def send_reminder(context: ContextTypes.DEFAULT_TYPE, chat_id: int, task: str, projects: list,
                         interval: int) -> None:
     projects_list = "\n".join(f"- {project}" for project in sorted(projects))
-    next_reminder = datetime.now(TIMEZONE) + timedelta(hours=interval)
+    next_reminder = datetime.now(TIMEZONE) + timedelta(minutes=interval)
     next_reminder = get_next_workday(next_reminder)
     next_reminder_str = f"{next_reminder.day} {MONTHS[next_reminder.month]}"
     message = f"*📋ПОРА {task.upper()}*\n\n{projects_list}\n\n*⏰СЛЕДУЮЩИЙ РАЗ НАПОМНЮ {next_reminder_str}*"
@@ -297,7 +300,7 @@ async def check_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
         for task_name, reminder_data in reminders.items():
             await send_reminder(context, context.job.data['chat_id'], task_name, list(reminder_data["projects"]),
                                 reminder_data["interval"])
-            next_reminder_time = now + timedelta(hours=reminder_data["interval"])
+            next_reminder_time = now + timedelta(minutes=reminder_data["interval"])
             next_reminder_time = get_next_workday(next_reminder_time)
             with sqlite3.connect('tasks.db') as conn:
                 c = conn.cursor()
@@ -321,15 +324,36 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_surname = context.user_data.get('surname', 'Неизвестный пользователь')
     update_user_status(update.message.from_user.id, user_surname, "Отключен")
     await update.message.reply_text("Вы отключены от бота. Если захотите снова подключиться, просто напишите /start.")
-def ping_server(context: ContextTypes.DEFAULT_TYPE):
-    # Здесь можно выполнить любое действие, чтобы поддерживать активность
-    logger.info("Ping server to keep it alive")
+
 
 def main() -> None:
     init_db()
     logger.info(f"Бот запущен. Текущее время: {datetime.now(TIMEZONE)}")
-    application = Application.builder().token(BOT_TOKEN).build()
-    application.job_queue.run_repeating(ping_server, interval=timedelta(minutes=10))
+
+    # Настройка пути для хранения данных
+    if os.environ.get('RENDER'):
+        persistence_path = '/data/bot_data.pickle'
+        # Создаем директорию если её нет
+        os.makedirs('/data', exist_ok=True)
+    else:
+        persistence_path = 'bot_data.pickle'
+
+    persistence = PicklePersistence(
+        filepath=persistence_path,
+        store_data=PersistenceInput(
+            chat_data=True,
+            user_data=True,
+            bot_data=True,
+            callback_data=True
+        )
+    )
+
+    application = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .persistence(persistence)
+        .build()
+    )
 
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start)],

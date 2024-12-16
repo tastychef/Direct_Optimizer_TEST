@@ -330,30 +330,13 @@ def main() -> None:
     init_db()
     logger.info(f"Бот запущен. Текущее время: {datetime.now(TIMEZONE)}")
 
-    # Настройка пути для хранения данных
-    if os.environ.get('RENDER'):
-        persistence_path = '/data/bot_data.pickle'
-        # Создаем директорию если её нет
-        os.makedirs('/data', exist_ok=True)
-    else:
-        persistence_path = 'bot_data.pickle'
+    application = Application.builder().token(BOT_TOKEN).build()
 
-    persistence = PicklePersistence(
-        filepath=persistence_path,
-        store_data=PersistenceInput(
-            chat_data=True,
-            user_data=True,
-            bot_data=True,
-            callback_data=True
-        )
-    )
+    # Добавляем обработчик для health check
+    async def health_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await update.message.reply_text("OK")
 
-    application = (
-        Application.builder()
-        .token(BOT_TOKEN)
-        .persistence(persistence)
-        .build()
-    )
+    application.add_handler(CommandHandler("health", health_check))
 
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
@@ -374,7 +357,9 @@ def main() -> None:
             listen="0.0.0.0",
             port=port,
             webhook_url=webhook_url,
-            secret_token=os.environ.get("SECRET_TOKEN")
+            secret_token=os.environ.get("SECRET_TOKEN"),
+            drop_pending_updates=True,  # Игнорируем обновления во время перезапуска
+            allowed_updates=[]  # Оптимизируем обработку обновлений
         )
     else:
         application.run_polling()
